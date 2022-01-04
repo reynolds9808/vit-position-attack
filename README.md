@@ -41,8 +41,11 @@ on cifar100
 ## Requirement
 
 transformers 4.8.2
+
 pytorch 1.9.0
+
 pillow 8.4.0
+
 datasets 1.17.0
 
 
