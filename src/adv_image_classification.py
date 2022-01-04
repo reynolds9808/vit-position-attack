@@ -36,7 +36,6 @@ from torchvision.transforms import (
     Resize,
     ToTensor,
 )
-from dataloader_food import FoodData
 from attack_methods import Attack_PGD
 import torch.optim as optim
 from tqdm import tqdm

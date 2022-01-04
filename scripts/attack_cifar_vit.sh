@@ -25,15 +25,15 @@
 # -------------------------
 python ../src/adv_image_classification.py \
     --dataset_name cifar100\
-    --model_name_or_path  ../model/1e-4_cifar100_vit_finelabel/\
-    --attack_model_dir ../model/attack_cifar100_vit/ \
-    --output_dir ../model/1e-4_cifar100_vit_finelabel/ \
+    --model_name_or_path  /home/LAB/hemr/workspace/Vit_position_attack/model/1e-4_cifar100_vit_finelabel/\
+    --attack_model_dir /home/LAB/hemr/workspace/Vit_position_attack/model/attack_cifar100_vit/ \
+    --output_dir /home/LAB/hemr/workspace/Vit_position_attack/model/1e-4_cifar100_vit_finelabel/ \
     --overwrite_output_dir \
     --remove_unused_columns False \
     --test_type random \
     --learning_rate 1e-2 \
     --num_labels 100 \
-    --output_logs_path ../log/adv_cifar100_2_FixedPGD.logs \
+    --output_logs_path /home/LAB/hemr/workspace/Vit_position_attack/log/adv_cifar100_2_FixedPGD.logs \
     --num_train_epochs 1 \
     --per_device_train_batch_size 8 \
     --per_device_eval_batch_size 8 \

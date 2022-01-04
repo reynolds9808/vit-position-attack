@@ -26,7 +26,6 @@ select 14 patches
 |food101        |91.22|24.81|**16.97**|
 |beans          |99.25|34.17|**16.67**|
 
-
 ## Test PGD attacks with different patches
 
 on cifar100
@@ -38,4 +37,12 @@ on cifar100
 |4|**27.47**|
 
 **The TOPK gradient distribution map of each dataset is in the plot folder**
+
+## Requirement
+
+transformers 4.8.2
+pytorch 1.9.0
+pillow 8.4.0
+datasets 1.17.0
+
 
