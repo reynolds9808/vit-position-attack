@@ -26,6 +26,7 @@ import torch.nn as nn
 import torch
 from datasets import load_dataset
 from PIL import Image
+import matplotlib.pyplot as plt
 from torchvision.transforms import (
     CenterCrop,
     Compose,
@@ -35,6 +36,7 @@ from torchvision.transforms import (
     Resize,
     ToTensor,
 )
+from dataloader_food import FoodData
 from attack_methods import Attack_PGD
 import torch.optim as optim
 from tqdm import tqdm
@@ -167,28 +169,49 @@ class TestArguments:
         default="../model/attack_cifar10_vit/",
         metadata={"help": 'attack_model_dir'},
     )
+    attack_flag: str = field(
+        default="Token",
+        metadata={"help": 'attack_type: False Token FGSM'},
+    )
+    top_k: int = field(
+        default=8,
+        metadata={"help": 'attack patch top k'}
+    )
+    num_labels: int = field(
+        default=10,
+        metadata={"help": 'label num'}
+    )
+    output_logs_path: str = field(
+        default="/home/LAB/hemr/workspace/Vit_position_attack/log/adv_cifar.logs",
+        metadata={"help": 'output path'}
+    )
+
 
 def collate_fn(examples):
     #pixel_values = torch.stack([torch.tensor(example["pixel_values"]) for example in examples])   #[batch_size, 3, 224, 224]
     pixel_values = torch.stack([example["pixel_values"] for example in examples])
-    labels = torch.tensor([example["label"] for example in examples])
+    labels = torch.tensor([example["fine_label"] for example in examples])
 
     #print(pixel_values)
     return pixel_values, labels
 
-config_pgd = {
-    'train': False,
-    'targeted': False,
-    'epsilon': 8.0 / 255 * 2,
-    'num_steps': 20,
-    'step_size': 2.0 / 255 * 2,
-    'random_start': True,
-    'top_k' : 32,
-    'patch_num': 14,
-    'image_size': 224,
-    'embedding_d': 768,
-    'loss_func': torch.nn.CrossEntropyLoss(reduction='none')
-}
+def plot_patch(plotx, path):
+    plt.figure(figsize=(10,5), dpi=100)
+    distance = 10
+    group_num = 196
+    plt.hist(plotx, bins=group_num)
+    plt.xticks(range(0,196)[::distance],fontsize=8)
+    plt.grid(linestyle="--", alpha=0.5)
+    plt.xlabel("patch id")
+    plt.ylabel("patch num in topk")
+    num = 0
+    w = str(num) + ".jpg"
+    out_path = os.path.join(path, w)
+    while(os.path.exists(out_path)):
+        num = num + 1
+        w = str(num) + ".jpg"
+        out_path = os.path.join(path, w)
+    plt.savefig(out_path)
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -202,6 +225,22 @@ def main():
         model_args, data_args, training_args, test_args= parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args, test_args = parser.parse_args_into_dataclasses()
+
+    config_pgd = {
+        'train': False,
+        'targeted': False,
+        'epsilon': 8.0 / 255 * 2,
+        'num_step': 20,
+        'num_labels': test_args.num_labels,
+        'step_size': 2.0 / 255 * 2,
+        'random_start': True,
+        'top_k' : test_args.top_k,
+        'patch_num': 14,
+        'image_size': 224,
+        'embedding_d': 768,
+        'attack_flag': test_args.attack_flag,
+        'loss_func': torch.nn.CrossEntropyLoss(reduction='mean')
+    }
 
     # Setup logging
     logging.basicConfig(
@@ -243,7 +282,7 @@ def main():
         data_args.dataset_name,
         data_args.dataset_config_name,
         data_files=data_args.data_files,
-        cache_dir=model_args.cache_dir
+        cache_dir=model_args.cache_dir,
     )
 
     # If we don't have a validation split, split off a percentage of train as validation.
@@ -256,7 +295,10 @@ def main():
     # Prepare label mappings.
     # We'll include these in the model's config to get human readable labels in the Inference API.
     #print(ds)
-    labels = ds["train"].features["label"].names
+    if "cifar100" in data_args.dataset_name:
+        labels = ds["train"].features["fine_label"].names
+    else:
+        labels = ds["train"].features["label"].names
     label2id, id2label = dict(), dict()
     for i, label in enumerate(labels):
         label2id[label] = str(i)
@@ -319,30 +361,42 @@ def main():
     def train_transforms(example_batch):
         """Apply _train_transforms across a batch."""
         #print(len(example_batch["img"]))
-        example_batch["pixel_values"] = [_train_transforms(Image.fromarray(np.array(f).astype('uint8'), mode='RGB')) for f in example_batch["img"]]
+        #example_batch["pixel_values"] = [_train_transforms(Image.fromarray(np.array(f).astype('uint8')).convert("RGB")) for f in example_batch["image"]]
+        if "cifar" in data_args.dataset_name:
+            example_batch["pixel_values"] = [_train_transforms(Image.fromarray(np.array(f).astype('uint8'), mode='RGB')) for f in example_batch["img"]]
         #example_batch["pixel_values"] = torch.Tensor(example_batch["img"])
+        else:
+            example_batch["pixel_values"] = [_train_transforms(pil_img.convert("RGB")) for pil_img in example_batch["image"]]
         return example_batch
 
     def val_transforms(example_batch):
         """Apply _val_transforms across a batch."""
-        example_batch["pixel_values"] = [_val_transforms(Image.fromarray(np.array(f).astype('uint8'), mode='RGB'))for f in example_batch["img"]]
+        #example_batch["pixel_values"] = [_train_transforms(Image.fromarray(np.array(f).astype('uint8')).convert("RGB")) for f in example_batch["image"]]
+        if "cifar" in data_args.dataset_name:
+            example_batch["pixel_values"] = [_val_transforms(Image.fromarray(np.array(f).astype('uint8'), mode='RGB'))for f in example_batch["img"]]
         #example_batch["pixel_values"] = torch.Tensor(example_batch["img"])
+        else:
+            example_batch["pixel_values"] = [_train_transforms(pil_img.convert("RGB")) for pil_img in example_batch["image"]]
         #print(example_batch)
         return example_batch
     # Write model card and (optionally) push to hub
     ds["validation"].set_transform(val_transforms)
     valloader = DataLoader(ds["validation"], batch_size=training_args.per_device_eval_batch_size, collate_fn=collate_fn)
+    
 
     start_epoch = 0
     net = Attack_PGD(model, feature_extractor, config_pgd)
     criterion = nn.CrossEntropyLoss()
-
+    
+    print("Let's use", torch.cuda.device_count(), "GPUs!")
     optimizer = optim.SGD(net.parameters(),
                           lr=training_args.learning_rate,
                           momentum=0.9, #momentum
                           weight_decay=2e-4)#args.weight_decay)
-
+    f = open(test_args.output_logs_path, 'a')
+    tot_distribution = torch.rand(0).to(device)
     def test(epoch, net):
+        tot_distribution = torch.rand(0).to(device)
         #print("epoch: ",epoch)
         net.eval()
         test_loss = 0
@@ -353,20 +407,21 @@ def main():
         for batch_idx, (inputs, targets) in enumerate(iterator):
             start_time = time.time()
             optimizer.zero_grad()
-            #targets = targets.to(device)  #[bacth_size]
-
-            outputs, loss = net(inputs, targets, batch_idx=batch_idx)
-
-            loss.backward()
+            inputs = inputs.to(device)
+            targets = targets.to(device)  #[bacth_size]
+            outputs, loss, patch_distribution = net(inputs, targets, batch_idx=batch_idx)
+            tot_distribution = torch.cat((tot_distribution, patch_distribution),0)
             """
             for i in optimizer.param_groups[0]['params']:
                 if i.requires_grad == True:
                     print(i.grad)
             """
             #pu.db
-            optimizer.step()
+            if test_args.attack_flag == "Token":
+                loss.backward()
+                optimizer.step()
+            
             test_loss += loss.item()
-
             duration = time.time() - start_time
 
             _, predicted = outputs.max(1)
@@ -381,7 +436,11 @@ def main():
                 print(
                     "step %d, duration %.2f, test  acc %.2f, avg-acc %.2f, loss %.2f"
                     % (batch_idx, duration, 100. * correct_num / batch_size,
-                    100. * correct / total, test_loss / total))
+                    100. * correct / total, test_loss * batch_size/ total), file=f)
+                print(
+                    "step %d, duration %.2f, test  acc %.2f, avg-acc %.2f, loss %.2f"
+                    % (batch_idx, duration, 100. * correct_num / batch_size,
+                    100. * correct / total, test_loss * batch_size/ total))
         if epoch >= 0:
             print('Saving latest @ epoch %s..' % (epoch))
             f_path = os.path.join(test_args.attack_model_dir, 'latest')
@@ -395,6 +454,10 @@ def main():
             torch.save(state, f_path)
         acc = 100. * correct / total
         print('Val acc:', acc)
+        print('distribution shape : ',tot_distribution.shape)
+        f2 = open("/home/LAB/hemr/workspace/Vit_position_attack/plot/food101_FGSM_tot_distribution.txt", 'a')
+        print(tot_distribution.tolist(), file=f2)
+        plot_patch(tot_distribution.tolist(), "/home/LAB/hemr/workspace/Vit_position_attack/plot")
         return acc
 
     for epoch in range(start_epoch, int(training_args.num_train_epochs)):

@@ -8,18 +8,22 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, SequenceClassifierOutput
 from transformers.file_utils import ModelOutput
 from transformers import ViTPreTrainedModel
+from torch.autograd import Variable
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import collections.abc
+from collections import Counter
+import matplotlib.pyplot as plt
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def to_2tuple(x):
     if isinstance(x, collections.abc.Iterable):
         return x
     return (x, x)
-
 
 @dataclass
 class BaseModelOutputWithPooling(ModelOutput):
@@ -28,6 +32,8 @@ class BaseModelOutputWithPooling(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     patch_embeddings: torch.FloatTensor = None
+    patch_distribution: torch.FloatTensor = None
+    
 
 
 @dataclass
@@ -37,6 +43,7 @@ class SequenceClassifierOutput(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     patch_embeddings: torch.FloatTensor = None
+    patch_distribution: torch.FloatTensor = None
 
 
 class PatchEmbeddings(nn.Module):
@@ -85,15 +92,81 @@ class ViTEmbeddings(nn.Module):
         self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches + 1, config.hidden_size))
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, pixel_values):
+    def plot_patch(self, plotx, path):
+        plt.figure(figsize=(10,5), dpi=100)
+        distans = 1
+        group_num = 196
+        plt.hist(plotx, bins=group_num)
+        plt.xticks(range(0,196),fontsize=8)
+        plt.grid(linestyle="--", alpha=0.5)
+        plt.xlabel("patch id")
+        plt.ylabel("patch num in topk")
+        num = 0
+        w = str(num) + ".jpg"
+        out_path = os.path.join(path, w)
+        while(os.path.exists(out_path)):
+            num = num + 1
+            w = str(num) + ".jpg"
+            out_path = os.path.join(path, w)
+        plt.savefig(out_path)
+        #plt.show()
+
+    def forward(
+        self, 
+        pixel_values,
+        attack_flag="False",
+        patch_grad=None,
+        attack_w=None,
+        top_k=None,
+        epsilon=None,
+    ):
         batch_size = pixel_values.shape[0]
         patch_embeddings = self.patch_embeddings(pixel_values)
         #patch_embeddings.retain_grad()
+        patch_distribution = torch.rand(0).to(device)
+        if attack_flag != "False":    #[batch, 196, 768]
+            sum_patch = torch.sum(patch_grad, dim = 2) #[batch, 196]
+            for batch_id in range(patch_embeddings.shape[0]):
+                temp_sum_patch = sum_patch[batch_id, : ]
+                vlaues, top_k_patch = temp_sum_patch.topk(top_k)
+                if "Random" in attack_flag:
+                    top_k_patch = torch.randperm(torch.tensor(range(0,patch_embeddings.shape[1])).size(0))[:top_k].to(device)
+                
+                if "Fixed" in attack_flag:
+                    #top_k_patch = torch.tensor([5,21,34,49,63,76,91,105,118,133,147,160,174,189]).to(device)
+                    #top_k_patch = torch.tensor([49,63,76,91,105,118,133,147]).to(device)
+                    #top_k_patch = torch.tensor([76,91,105,118]).to(device)
+                    top_k_patch = torch.tensor([91,105]).to(device)
+                    #print(top_k_patch.shape)
+                #temp_Counter = Counter(top_k_patch.view(-1).tolist())
+                #patch_distribution = patch_distribution + temp_Counter
+                patch_distribution = torch.cat((patch_distribution, top_k_patch.view(-1)),0)
+                for i in top_k_patch:
+                    #patch_embeddings[batch_id, i, :] = patch_embeddings[batch_id, i, :] + attack_w[i, :]
+                    if "FGSM" in attack_flag or "PGD" in attack_flag:
+                        patch_embeddings[batch_id, i, :] = patch_embeddings[batch_id, i, :] + epsilon * patch_grad[batch_id, i].sign()
+                        patch_embeddings[batch_id, i, :] = torch.clamp(patch_embeddings[batch_id, i, :], -1.0, 1.0)
+                    if "Token" in attack_flag:
+                        patch_embeddings[batch_id, i, :] = patch_embeddings[batch_id, i, :] + attack_w[i, :]           
+            if "PGD" in attack_flag:
+                new_patch_embeddings = Variable(patch_embeddings)
+                new_patch_embeddings.requires_grad_()
+                new_patch_embeddings.retain_grad()
+                cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+                embeddings = torch.cat((cls_tokens, new_patch_embeddings), dim=1)
+                embeddings = embeddings + self.position_embeddings
+                embeddings = self.dropout(embeddings)
+                return embeddings, new_patch_embeddings, patch_distribution
+            #self.plot_patch(patch_distribution.tolist(), "/home/LAB/hemr/workspace/Vit_position_attack/plot")
+        else:
+            patch_embeddings.retain_grad()
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
         embeddings = torch.cat((cls_tokens, patch_embeddings), dim=1)
         embeddings = embeddings + self.position_embeddings
         embeddings = self.dropout(embeddings)
-        return embeddings, patch_embeddings
+        
+        return embeddings, patch_embeddings, patch_distribution
+
 
 
 class ViTSelfAttention(nn.Module):
@@ -388,6 +461,11 @@ class ViTModel(ViTPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        attack_flag="False",
+        patch_grad=None,
+        attack_w=None,
+        top_k=None,
+        epsilon=None,
     ):
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -400,7 +478,14 @@ class ViTModel(ViTPreTrainedModel):
 
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
-        embedding_output, patch_embeddings = self.embeddings(pixel_values)
+        embedding_output, patch_embeddings, patch_distribution = self.embeddings(
+            pixel_values=pixel_values, 
+            attack_flag=attack_flag, 
+            patch_grad=patch_grad, 
+            attack_w=attack_w, 
+            top_k=top_k,
+            epsilon=epsilon,
+        )
 
         encoder_outputs = self.encoder(
             embedding_output,
@@ -421,7 +506,8 @@ class ViTModel(ViTPreTrainedModel):
             pooler_output=pooled_output,
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
-            patch_embeddings = patch_embeddings
+            patch_embeddings = patch_embeddings,
+            patch_distribution = patch_distribution,
         )
 
 class ViTForImageClassificationGetpatch(ViTPreTrainedModel):
@@ -444,17 +530,26 @@ class ViTForImageClassificationGetpatch(ViTPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        attack_flag="False",
+        patch_grad=None,
+        attack_w=None,
+        top_k=None,
+        epsilon=None,
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         outputs = self.vit(
             pixel_values,
             head_mask=head_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            attack_flag=attack_flag,
+            patch_grad=patch_grad,
+            attack_w=attack_w,
+            top_k=top_k,
+            epsilon=epsilon,
         )
-
+        
         sequence_output = outputs[0]
 
         logits = self.classifier(sequence_output[:, 0, :])
@@ -479,4 +574,5 @@ class ViTForImageClassificationGetpatch(ViTPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             patch_embeddings=outputs.patch_embeddings,
+            patch_distribution=outputs.patch_distribution,
         )
